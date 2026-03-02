@@ -20,13 +20,30 @@ st.markdown("""
 # DATA LOADING
 # ===============================
 
+import ast
+
 @st.cache_data
 def load_google():
     df = pd.read_csv("google_sample_small.csv")
+
+    # Convert timestamp to minute index
     df["minute"] = (df["time"] / 1e6 / 60).astype(int)
     df["minute"] -= df["minute"].min()
     df = df[df["minute"] < 1440]
-    return df.groupby("minute")["cpu_numeric"].sum().reindex(range(1440), fill_value=0).values
+
+    # Extract CPU value from resource_request column
+    def extract_cpu(x):
+        try:
+            d = ast.literal_eval(x)
+            return float(d.get("cpus", 0))
+        except:
+            return 0
+
+    df["cpu"] = df["resource_request"].apply(extract_cpu)
+
+    cpu_series = df.groupby("minute")["cpu"].sum().reindex(range(1440), fill_value=0)
+
+    return cpu_series.values
 
 @st.cache_data
 def load_carbon():
@@ -249,3 +266,4 @@ with tabs[11]:
     - Seasonal variability modeling
     - Live renewable forecasting integration
     """)
+

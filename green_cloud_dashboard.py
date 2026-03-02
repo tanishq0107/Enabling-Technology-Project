@@ -47,7 +47,7 @@ def load_google():
 
 @st.cache_data
 def load_carbon():
-    df = pd.read_csv("carbon_intensity_Data.csv")
+    df = pd.read_csv("Carbon_Intensity_Data")
     df.columns = ["Datetime","Actual","Forecast","Index"]
     df["Datetime"] = pd.to_datetime(df["Datetime"])
     df = df.set_index("Datetime").resample("1T").ffill()
@@ -266,6 +266,7 @@ with tabs[11]:
     - Seasonal variability modeling
     - Live renewable forecasting integration
     """)
+
 
 
 

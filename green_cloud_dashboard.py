@@ -2,233 +2,250 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy import stats
 
 st.set_page_config(layout="wide")
 
-st.title("🌱 Green Cloud Computing Simulation Dashboard")
-st.subheader("Stochastic Carbon-Risk-Aware Workload Scheduling")
-
-# =====================================================
-# SECTION 1 – PROBLEM STATEMENT
-# =====================================================
-
-st.header("1️⃣ Problem Statement")
-
-st.write("""
-Modern cloud data centers consume massive electricity and contribute
-significantly to global carbon emissions. Traditional schedulers optimize
-performance and utilization but ignore carbon volatility and emission risks.
-
-This project investigates how workload scheduling strategies affect:
-
-- Total CO₂ emissions
-- SLA violation probability
-- System overload probability
-- Carbon spike exposure
-""")
-
-# =====================================================
-# SECTION 2 – DATASETS USED
-# =====================================================
-
-st.header("2️⃣ Datasets Used")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("📊 Workload Dataset")
-    st.write("""
-    - Google 2019 Cluster Sample
-    - Real CPU task requests
-    - Minute-level aggregation
-    """)
-
-with col2:
-    st.subheader("🌍 Carbon Intensity Dataset")
-    st.write("""
-    - UK National Grid (1 month)
-    - Actual carbon intensity (gCO2/kWh)
-    - Minute-level resampling
-    """)
-
-# =====================================================
-# SECTION 3 – SYSTEM ARCHITECTURE
-# =====================================================
-
-st.header("3️⃣ System Architecture")
-
-st.write("""
-Simulation Flow:
-
-1. Load real workload data (CPU demand per minute)
-2. Load real carbon intensity data
-3. Apply scheduling strategy
-4. Compute utilization
-5. Calculate power consumption
-6. Calculate emissions
-7. Compute probabilistic metrics
-8. Run Monte Carlo (100 runs)
-""")
-
-# =====================================================
-# SECTION 4 – MATHEMATICAL MODEL
-# =====================================================
-
-st.header("4️⃣ Mathematical Model")
-
-st.latex(r"P(u) = P_{idle} + (P_{max} - P_{idle}) \cdot u")
-st.latex(r"Emission(t) = Energy(t) \times CarbonIntensity(t)")
-st.latex(r"SLA = P(CPU_{demand} > Capacity)")
-st.latex(r"CRI = I(CI > threshold) \times Utilization")
-
-# =====================================================
-# SECTION 5 – SCHEDULING STRATEGIES
-# =====================================================
-
-st.header("5️⃣ Scheduling Strategies")
+# ===============================
+# PREMIUM HEADER
+# ===============================
 
 st.markdown("""
-- **Round Robin** – Baseline scheduling
-- **Carbon-Aware** – Reduce load during high-carbon periods
-- **Renewable-Aware** – Increase load during low-carbon periods
-- **CRI-Aware (Proposed)** – Reduce load when carbon spike risk × utilization exceeds threshold
+# 🌱 Green Cloud Carbon-Risk Simulation Lab
+### Real Workload + Real Carbon + Stochastic Monte Carlo Framework
+---
 """)
 
-# =====================================================
-# SECTION 6 – SIMULATION PARAMETERS
-# =====================================================
+# ===============================
+# DATA LOADING
+# ===============================
 
-st.header("6️⃣ Simulation Parameters")
+@st.cache_data
+def load_google():
+    df = pd.read_csv("google_sample_small.csv")
+    df["minute"] = (df["time"] / 1e6 / 60).astype(int)
+    df["minute"] -= df["minute"].min()
+    df = df[df["minute"] < 1440]
+    return df.groupby("minute")["cpu_numeric"].sum().reindex(range(1440), fill_value=0).values
 
-col1, col2, col3 = st.columns(3)
+@st.cache_data
+def load_carbon():
+    df = pd.read_csv("carbon_intensity.csv")
+    df.columns = ["Datetime","Actual","Forecast","Index"]
+    df["Datetime"] = pd.to_datetime(df["Datetime"])
+    df = df.set_index("Datetime").resample("1T").ffill()
+    return df["Actual"].values[:1440]
 
-with col1:
-    num_servers = st.slider("Number of Servers", 1, 20, 3)
+workload = load_google()
+carbon = load_carbon()
 
-with col2:
-    monte_runs = st.slider("Monte Carlo Runs", 10, 200, 100)
+# ===============================
+# SIDEBAR CONTROLS
+# ===============================
 
-with col3:
-    util_threshold = st.slider("Utilization Threshold", 0.5, 1.0, 0.85)
+st.sidebar.header("⚙ Simulation Controls")
 
-# =====================================================
-# SECTION 7 – SIMULATED RESULTS (Your Actual Results)
-# =====================================================
+servers = st.sidebar.slider("Servers",1,10,3)
+runs = st.sidebar.slider("Monte Carlo Runs",50,300,150)
+util_threshold = st.sidebar.slider("Utilization Threshold",0.6,0.95,0.85)
+carbon_percentile = st.sidebar.slider("Carbon Spike Percentile",60,95,75)
 
-st.header("7️⃣ Results Summary")
+run_btn = st.sidebar.button("🚀 Run Simulation")
 
-data = {
-    "Strategy": ["Round Robin", "Carbon-Aware", "Renewable-Aware", "CRI-Aware"],
-    "Expected Emission": [922.85, 901.07, 932.35, 916.78],
-    "SLA Probability": [0.0104, 0.0090, 0.0118, 0.0083],
-    "Overload Probability": [0.0184, 0.0155, 0.0195, 0.0150]
-}
+TOTAL_CAPACITY = servers * 1.0
+CARBON_THRESHOLD = np.percentile(carbon, carbon_percentile)
 
-df = pd.DataFrame(data)
-st.dataframe(df)
+# ===============================
+# SIMULATION FUNCTION
+# ===============================
 
-# =====================================================
-# SECTION 8 – RESULTS VISUALIZATION
-# =====================================================
+def simulate(strategy):
 
-st.header("8️⃣ Emission Comparison")
+    emissions, sla_probs, overload_probs = [], [], []
 
-fig, ax = plt.subplots()
-ax.bar(df["Strategy"], df["Expected Emission"])
-ax.set_ylabel("Expected CO2 Emission")
-plt.xticks(rotation=30)
-st.pyplot(fig)
+    for _ in range(runs):
 
-st.header("9️⃣ SLA Violation Probability")
+        total_emission = 0
+        sla = 0
+        overload = 0
 
-fig2, ax2 = plt.subplots()
-ax2.bar(df["Strategy"], df["SLA Probability"])
-ax2.set_ylabel("SLA Probability")
-plt.xticks(rotation=30)
-st.pyplot(fig2)
+        for t in range(1440):
 
-# =====================================================
-# SECTION 10 – KEY FINDINGS
-# =====================================================
+            cpu = np.random.normal(workload[t], workload[t]*0.05)
+            cpu = max(cpu,0)
 
-st.header("🔟 Key Findings")
+            util = cpu / TOTAL_CAPACITY
 
-st.write("""
-✅ Carbon-Aware scheduling achieved lowest emissions  
-❌ Renewable-Aware increased total emissions  
-⚖️ CRI-Aware balanced emission reduction and SLA stability  
-📉 Carbon intensity optimization alone does not guarantee emission reduction  
-📊 Trade-off exists between sustainability and performance  
-""")
+            if strategy=="Carbon-Aware" and carbon[t]>CARBON_THRESHOLD:
+                cpu *= 0.75
+            elif strategy=="Renewable-Aware" and carbon[t]<CARBON_THRESHOLD:
+                cpu *= 1.05
+            elif strategy=="CRI-Aware":
+                if carbon[t]>CARBON_THRESHOLD and util>0.5:
+                    cpu *= 0.6
 
-# =====================================================
-# SECTION 11 – CARBON RISK INDEX CONTRIBUTION
-# =====================================================
+            util = cpu / TOTAL_CAPACITY
 
-st.header("1️⃣1️⃣ Novel Contribution – Carbon Risk Index")
+            power = (100 + 200*util)*1.4
+            energy = power/60
+            total_emission += energy*carbon[t]/1000
 
-st.write("""
-CRI models carbon spike risk weighted by system utilization.
-Unlike pure carbon-aware scheduling, CRI accounts for system stress.
+            if cpu > TOTAL_CAPACITY:
+                sla +=1
+            if util > util_threshold:
+                overload +=1
 
-This enables:
-- Risk-sensitive emission control
-- Balanced SLA performance
-- Selective workload reduction
-""")
+        emissions.append(total_emission)
+        sla_probs.append(sla/1440)
+        overload_probs.append(overload/1440)
 
-# =====================================================
-# SECTION 12 – WHAT THIS PROJECT DEMONSTRATES
-# =====================================================
+    return np.array(emissions), np.array(sla_probs), np.array(overload_probs)
 
-st.header("1️⃣2️⃣ What This Project Demonstrates")
+# ===============================
+# TABS
+# ===============================
 
-st.write("""
-1. Workload-carbon interaction is non-linear.
-2. Increasing computation during renewable periods may increase total emissions.
-3. Carbon-aware scheduling is more effective than renewable amplification.
-4. Risk-based scheduling balances sustainability and performance.
-5. Monte Carlo evaluation is essential for robust sustainability modeling.
-""")
+tabs = st.tabs([
+"Executive Summary",
+"Background & Gap",
+"Datasets",
+"Architecture",
+"Mathematical Model",
+"Scheduling Strategies",
+"Stochastic Framework",
+"Live Simulation",
+"Emission Distributions",
+"Risk & SLA Analysis",
+"Key Findings",
+"Limitations & Future Work"
+])
 
-# =====================================================
-# SECTION 13 – LIMITATIONS
-# =====================================================
+# --------------------------------
+# EXECUTIVE SUMMARY
+# --------------------------------
+with tabs[0]:
+    st.markdown("""
+    ### What This Project Does
+    This simulation evaluates how cloud workload scheduling strategies 
+    impact carbon emissions under real carbon intensity volatility.
 
-st.header("1️⃣3️⃣ Limitations")
+    It combines:
+    - Real Google workload traces
+    - Real UK grid carbon intensity
+    - Utilization-based power modeling
+    - Monte Carlo stochastic evaluation
+    - Novel Carbon Risk Index (CRI)
+    """)
 
-st.write("""
-- Only one month of carbon data used
-- No seasonal variability modeled
-- No geographical multi-region simulation
-- No real workload migration modeling
-""")
+# --------------------------------
+# ARCHITECTURE DIAGRAM
+# --------------------------------
+with tabs[3]:
 
-# =====================================================
-# SECTION 14 – FUTURE WORK
-# =====================================================
+    st.markdown("### Interactive System Architecture")
 
-st.header("1️⃣4️⃣ Future Work")
+    fig, ax = plt.subplots(figsize=(10,4))
+    ax.axis('off')
 
-st.write("""
-- Multi-region carbon-aware scheduling
-- Seasonal carbon analysis
-- Integration with renewable forecasting
-- Workload migration modeling
-""")
+    components = [
+        "Google Workload Data",
+        "Scheduler",
+        "Utilization Model",
+        "Power Model",
+        "Carbon Model",
+        "Monte Carlo Engine"
+    ]
 
-# =====================================================
-# SECTION 15 – CONCLUSION
-# =====================================================
+    for i,comp in enumerate(components):
+        ax.text(i*2,1,comp,ha='center',bbox=dict(boxstyle="round"))
+        if i>0:
+            ax.arrow((i*2)-1,1,0.8,0,head_width=0.1)
 
-st.header("1️⃣5️⃣ Conclusion")
+    st.pyplot(fig)
 
-st.write("""
-This project presents a stochastic, data-driven simulation framework
-for evaluating carbon-aware scheduling in cloud data centers.
+    st.write("""
+    The system processes workload and carbon data sequentially to compute
+    emission outputs under multiple scheduling policies.
+    """)
 
-It demonstrates that carbon intensity optimization alone is insufficient,
-and risk-sensitive scheduling provides better sustainability-performance trade-offs.
-""")
+# --------------------------------
+# MATHEMATICAL MODEL
+# --------------------------------
+with tabs[4]:
+    st.latex(r"P(u) = P_{idle} + (P_{max}-P_{idle})u")
+    st.latex(r"Emission = \sum Energy(t) \cdot CI(t)")
+    st.latex(r"SLA = P(Demand > Capacity)")
+    st.latex(r"CRI = I(CI>threshold) \times Utilization")
 
-st.success("Dashboard Generated Successfully 🚀")
+# --------------------------------
+# LIVE SIMULATION
+# --------------------------------
+with tabs[7]:
+
+    if run_btn:
+
+        strategies = ["Round Robin","Carbon-Aware","Renewable-Aware","CRI-Aware"]
+        results = {}
+
+        for s in strategies:
+            results[s] = simulate(s)
+
+        summary = []
+        for s in strategies:
+            emissions = results[s][0]
+            mean = emissions.mean()
+            ci = stats.sem(emissions)*1.96
+            summary.append({
+                "Strategy":s,
+                "Mean Emission":mean,
+                "95% CI ±":ci,
+                "Mean SLA":results[s][1].mean(),
+                "Mean Overload":results[s][2].mean()
+            })
+
+        st.dataframe(pd.DataFrame(summary))
+        st.success("Simulation Complete")
+
+# --------------------------------
+# EMISSION DISTRIBUTIONS
+# --------------------------------
+with tabs[8]:
+
+    if run_btn:
+
+        for s in strategies:
+            fig, ax = plt.subplots()
+            ax.hist(results[s][0], bins=20)
+            ax.set_title(f"{s} Emission Distribution")
+            st.pyplot(fig)
+
+# --------------------------------
+# KEY FINDINGS
+# --------------------------------
+with tabs[10]:
+
+    st.markdown("""
+    ### Core Research Insights
+
+    1. Carbon-aware scheduling reduces total emission.
+    2. Renewable amplification may increase overall energy.
+    3. Emission = Energy × Carbon → non-linear effect.
+    4. CRI provides balanced sustainability-performance tradeoff.
+    5. Monte Carlo evaluation reveals probabilistic risk exposure.
+    """)
+
+# --------------------------------
+# LIMITATIONS
+# --------------------------------
+with tabs[11]:
+    st.write("""
+    - One-month carbon dataset
+    - Single region modeling
+    - No workload migration modeling
+    - No seasonal variation included
+
+    Future Work:
+    - Multi-region carbon-aware scheduling
+    - Seasonal variability modeling
+    - Live renewable forecasting integration
+    """)
